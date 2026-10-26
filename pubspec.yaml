@@ -1,0 +1,28 @@
+name: site_manager
+description: 站点管家 - 独立的 API 站点管理工具（无账号体系，数据只在本机与你自己的站点之间流动）
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.4.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.2
+  provider: ^6.1.2
+  shared_preferences: ^2.2.3
+  flutter_secure_storage: ^9.2.2
+  # 6.1.5 的 android 构建脚本用了已被新版 AGP 移除的 proguard-android.txt，
+  # 在最新 Flutter stable 上构建失败；6.2.0-beta.3 已修复（改用 proguard-android-optimize.txt）
+  flutter_inappwebview: 6.2.0-beta.3
+  # 聊天 Markdown 渲染
+  flutter_markdown: ^0.7.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
