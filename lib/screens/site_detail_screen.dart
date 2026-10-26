@@ -472,8 +472,12 @@ class _SiteDetailScreenState extends State<SiteDetailScreen>
     );
     if (ok == true && mounted) {
       _snack('已保存网页登录态');
-      _refreshBalance(silent: true);
-      _refreshCheckin();
+      // 串行化：余额先刷完、签到再查。两路并发时曾用同一个旧刷新令牌
+      // 各发一次 POST /api/user/auth/refresh，触发服务端令牌复用检测
+      // 吊销会话，表现为「刚登录完又弹登录」。SiteClient 侧另有
+      // in-flight 合并兜底，这里串行是第一道防线。
+      await _refreshBalance(silent: true);
+      if (mounted) await _refreshCheckin();
     }
   }
 

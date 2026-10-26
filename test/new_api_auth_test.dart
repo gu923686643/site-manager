@@ -150,8 +150,112 @@ void main() {
       client.close();
     });
 
-    test('refresh 401 -> NeedWebLoginException', () async {
+    test('余额+签到并发刷新只发一次 POST（登录后又弹登录的回归）', () async {
+      var refreshCount = 0;
+      final refreshCookies = <String?>[];
       final mock = MockClient((req) async {
+        if (req.url.path == '/api/user/auth/refresh') {
+          refreshCount++;
+          refreshCookies.add(req.headers['cookie']);
+          // 拖住刷新响应，让第二路调用在刷新进行中到达
+          await Future.delayed(const Duration(milliseconds: 50));
+          return http.Response(
+            jsonEncode({
+              'success': true,
+              'data': {
+                'access_token': 'AT-C',
+                'token_type': 'Bearer',
+                'access_expires_at':
+                    DateTime.now().millisecondsSinceEpoch ~/ 1000 + 900,
+              }
+            }),
+            200,
+            headers: {
+              'set-cookie':
+                  'new_api_refresh=SID.NEW; Path=/api/user/auth; HttpOnly'
+            },
+          );
+        }
+        if (req.url.path == '/api/user/self') {
+          return http.Response(
+            jsonEncode({
+              'success': true,
+              'data': {'username': 'u', 'quota': 1, 'used_quota': 0}
+            }),
+            200,
+          );
+        }
+        if (req.url.path == '/api/user/checkin') {
+          return http.Response(
+            jsonEncode({
+              'success': true,
+              'data': {'checked_in': true}
+            }),
+            200,
+          );
+        }
+        return http.Response('not found', 404);
+      });
+      final client = SiteClient(httpClient: mock);
+      // 模拟详情页登录成功后余额与签到同时刷新
+      final results = await Future.wait([
+        client.fetchBalance(site(),
+            refreshToken: 'SID.OLD', onRefreshToken: _noop),
+        client.checkinStatus(site(), '',
+            refreshToken: 'SID.OLD', onRefreshToken: _noop),
+      ]);
+      expect((results[0] as BalanceInfo).username, 'u');
+      expect((results[1] as CheckinInfo).checkedIn, true);
+      // 关键断言：旧令牌只被用过一次，没有复用触发服务端吊销
+      expect(refreshCount, 1);
+      expect(refreshCookies.single, contains('new_api_refresh=SID.OLD'));
+      client.close();
+    });
+
+    test('轮换后传入新令牌命中缓存，不再 POST', () async {
+      var refreshCount = 0;
+      final mock = MockClient((req) async {
+        if (req.url.path == '/api/user/auth/refresh') {
+          refreshCount++;
+          return http.Response(
+            jsonEncode({
+              'success': true,
+              'data': {
+                'access_token': 'AT-R',
+                'token_type': 'Bearer',
+                'access_expires_at':
+                    DateTime.now().millisecondsSinceEpoch ~/ 1000 + 900,
+              }
+            }),
+            200,
+            headers: {
+              'set-cookie':
+                  'new_api_refresh=SID.NEW; Path=/api/user/auth; HttpOnly'
+            },
+          );
+        }
+        return http.Response(
+          jsonEncode({
+            'success': true,
+            'data': {'username': 'u', 'quota': 1, 'used_quota': 0}
+          }),
+          200,
+        );
+      });
+      final client = SiteClient(httpClient: mock);
+      String? rotated;
+      await client.fetchBalance(site(),
+          refreshToken: 'SID.OLD',
+          onRefreshToken: (v) async => rotated = v);
+      expect(rotated, 'SID.NEW');
+      // 调用方已拿到轮换后的新令牌：缓存必须命中，不能再 POST
+      await client.fetchBalance(site(),
+          refreshToken: 'SID.NEW', onRefreshToken: _noop);
+      expect(refreshCount, 1);
+      client.close();
+    });
+
+    test('refresh 401 -> NeedWebLoginException', () async {      final mock = MockClient((req) async {
         if (req.url.path == '/api/user/auth/refresh') {
           return http.Response('{"success":false}', 401);
         }

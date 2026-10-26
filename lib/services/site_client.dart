@@ -58,7 +58,11 @@ class CheckinInfo {
 /// 内存缓存的 access_token（新版 NewAPI 登录体系）。
 class _CachedToken {
   final String token;
-  final String refreshToken; // 发行它时所用的刷新令牌
+  // 发行它时最新已知的刷新令牌（轮换后更新）。缓存命中只看有效期，
+  // 不再拿它与调用方传入的令牌比对：轮换后调用方传入新令牌时，
+  // 旧的比对逻辑会误判缓存失效、白白多发一次刷新，而旧令牌复用
+  // 恰恰会触发服务端的令牌复用检测吊销会话。
+  final String refreshToken;
   final DateTime expiresAt;
   const _CachedToken(this.token, this.refreshToken, this.expiresAt);
 }
@@ -75,6 +79,10 @@ class SiteClient {
   static const timeout = Duration(seconds: 15);
   final http.Client _http;
   final Map<String, _CachedToken> _accessTokens = {};
+  // 同一站点进行中的刷新（per-site in-flight Future）：详情页登录成功后
+  // 余额与签到并发刷新时，后到的调用直接复用这次 POST 的结果，不再
+  // 用同一个旧刷新令牌发第二次刷新，避免触发服务端复用检测。
+  final Map<String, Future<String>> _refreshInFlight = {};
 
   SiteClient({http.Client? httpClient}) : _http = httpClient ?? http.Client();
 
@@ -103,17 +111,40 @@ class SiteClient {
   /// 刷新令牌每次使用都会轮换：把响应 Set-Cookie 里新的回写 WebView，
   /// 保持 App 与 WebView 一致，否则旧值超出重放窗口再用会触发
   /// "令牌复用"导致整个会话被吊销。
+  ///
+  /// 并发安全：缓存命中只看站点 id 与有效期；同一站点已有进行中刷新时，
+  /// 后到的调用复用该 Future，不再发第二次 POST。
   Future<String> _newApiAccessToken(
     Site site, {
     required String refreshToken,
     required Future<void> Function(String rotated) onRotated,
   }) async {
     final cached = _accessTokens[site.id];
-    if (cached != null &&
-        cached.refreshToken == refreshToken &&
-        DateTime.now().isBefore(cached.expiresAt)) {
+    if (cached != null && DateTime.now().isBefore(cached.expiresAt)) {
       return cached.token;
     }
+    final inFlight = _refreshInFlight[site.id];
+    if (inFlight != null) return inFlight;
+    final future = _refreshAccessToken(
+      site,
+      refreshToken: refreshToken,
+      onRotated: onRotated,
+    );
+    _refreshInFlight[site.id] = future;
+    try {
+      return await future;
+    } finally {
+      _refreshInFlight.remove(site.id);
+    }
+  }
+
+  /// 真正发一次 POST /api/user/auth/refresh 换 access_token。
+  /// 只由 [_newApiAccessToken] 调用（经缓存与 in-flight 合并后）。
+  Future<String> _refreshAccessToken(
+    Site site, {
+    required String refreshToken,
+    required Future<void> Function(String rotated) onRotated,
+  }) async {
     final base = site.normalizedBaseUrl;
     final resp = await _http
         .post(
@@ -158,7 +189,7 @@ class SiteClient {
         : DateTime.now().add(const Duration(minutes: 14));
     _accessTokens[site.id] = _CachedToken(
       token,
-      refreshToken,
+      rotated ?? refreshToken,
       expiresAt.subtract(const Duration(minutes: 1)),
     );
     return token;
